@@ -24,10 +24,10 @@ readme: build
 	@echo "" >> README.md
 	@echo "## Commands" >> README.md
 	@echo "" >> README.md
-	@echo "### start" >> README.md
+	@echo "### login" >> README.md
 	@echo "" >> README.md
 	@echo '```' >> README.md
-	@./dist/ralph start --help >> README.md
+	@./dist/ralph login --help >> README.md
 	@echo '```' >> README.md
 	@echo "" >> README.md
 	@echo "### init" >> README.md
@@ -36,10 +36,10 @@ readme: build
 	@./dist/ralph init --help >> README.md
 	@echo '```' >> README.md
 	@echo "" >> README.md
-	@echo "### version" >> README.md
+	@echo "### start" >> README.md
 	@echo "" >> README.md
 	@echo '```' >> README.md
-	@echo "ralph version - Show version information" >> README.md
+	@./dist/ralph start --help >> README.md
 	@echo '```' >> README.md
 
 .PHONY: build clean readme

@@ -47,6 +47,71 @@ Examples:
 
 ## Commands
 
+### login
+
+```
+ralph login - Set up Claude API authentication
+
+Usage:
+  ralph login
+
+Description:
+  Interactively set up authentication credentials for the Claude API.
+  Credentials are stored securely in the macOS Keychain.
+
+Authentication Methods:
+  1. OAuth Token (for Claude Pro/Max subscribers)
+     - You'll be guided through running 'claude setup-token'
+     - The token will be stored in keychain as 'ralph-claude-token'
+
+  2. API Key (for Anthropic API users)
+     - Enter your API key from https://console.anthropic.com/settings/keys
+     - The key will be stored in keychain as 'ralph-claude-token'
+
+Notes:
+  - Running 'ralph login' will show your current authentication status
+  - You can update existing credentials by running login again
+  - To manually check keychain: security find-generic-password -s "ralph-claude-token" -w
+  - To manually delete: security delete-generic-password -s "ralph-claude-token"
+```
+
+### init
+
+```
+ralph init - Generate TASKS.md from a task description
+
+Usage:
+  ralph init [options] <task description>
+
+Options:
+  --no-docker   Run locally instead of in Docker (default is Docker)
+  --fresh       Destroy and recreate the Docker container
+
+Description:
+  Uses Claude to generate a comprehensive TASKS.md file based on your
+  project description. The generated file will include:
+  - Project summary
+  - Features organized by ID (XX-NNNN format)
+  - Small, focused tasks for each feature
+  - Testing plans and quality checks
+
+Arguments:
+  <task description>  A description of what you want to build.
+                      Can be multiple words without quotes.
+
+Examples:
+  ralph init Build a REST API for user management
+  ralph init "Create a kanban board app with drag and drop"
+  ralph init --no-docker Build a web scraper
+  ralph init --fresh Build a new CLI tool
+
+Notes:
+  - Will not overwrite an existing TASKS.md file
+  - Run from the directory where you want to create the project
+  - By default runs in Docker (sandboxed with dangerous mode)
+  - The Docker container persists between runs (container: ralph-{projectname})
+```
+
 ### start
 
 ```
@@ -96,47 +161,4 @@ Examples:
 The loop will exit when:
   - Claude outputs "<ralph>complete</ralph>" (all tasks done)
   - Maximum iterations reached
-```
-
-### init
-
-```
-ralph init - Generate TASKS.md from a task description
-
-Usage:
-  ralph init [options] <task description>
-
-Options:
-  --no-docker   Run locally instead of in Docker (default is Docker)
-  --fresh       Destroy and recreate the Docker container
-
-Description:
-  Uses Claude to generate a comprehensive TASKS.md file based on your
-  project description. The generated file will include:
-  - Project summary
-  - Features organized by ID (XX-NNNN format)
-  - Small, focused tasks for each feature
-  - Testing plans and quality checks
-
-Arguments:
-  <task description>  A description of what you want to build.
-                      Can be multiple words without quotes.
-
-Examples:
-  ralph init Build a REST API for user management
-  ralph init "Create a kanban board app with drag and drop"
-  ralph init --no-docker Build a web scraper
-  ralph init --fresh Build a new CLI tool
-
-Notes:
-  - Will not overwrite an existing TASKS.md file
-  - Run from the directory where you want to create the project
-  - By default runs in Docker (sandboxed with dangerous mode)
-  - The Docker container persists between runs (container: ralph-{projectname})
-```
-
-### version
-
-```
-ralph version - Show version information
 ```
