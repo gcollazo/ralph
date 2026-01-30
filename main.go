@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,6 +216,15 @@ func init() {
 	logger = log.New(os.Stdout, "[ralph] ", log.Ldate|log.Ltime)
 }
 
+// getVersionString returns the full version string including Go version
+func getVersionString() string {
+	goVersion := "unknown"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		goVersion = info.GoVersion
+	}
+	return fmt.Sprintf("ralph version %s (%s)", version, goVersion)
+}
+
 func main() {
 	// Setup signal handling for cleanup
 	setupSignalHandler()
@@ -230,7 +240,7 @@ func main() {
 
 	// Handle version flags before other flag processing
 	if cmd == "-v" || cmd == "--version" {
-		fmt.Printf("ralph version %s\n", version)
+		fmt.Println(getVersionString())
 		return
 	}
 
@@ -283,7 +293,7 @@ func main() {
 		}
 		cmdLogin()
 	case "version":
-		fmt.Printf("ralph version %s\n", version)
+		fmt.Println(getVersionString())
 	case "help", "-h", "--help":
 		printGlobalHelp()
 	default:
