@@ -37,12 +37,13 @@ Authentication (required for Docker mode):
 Run 'ralph <command> --help' for more information on a specific command.
 
 Examples:
-  ralph                     Start in sandboxed Docker container (default)
-  ralph start               Start in sandboxed Docker container
-  ralph start --no-docker   Run locally without Docker
-  ralph init "Build a CLI"  Generate TASKS.md for building a CLI
-  ralph version             Show version information
-  ralph help                Show this help
+  ralph                              Start in sandboxed Docker container (default)
+  ralph start                        Start in sandboxed Docker container
+  ralph start --no-docker            Run locally without Docker
+  ralph init "Build a CLI"           Generate TASKS.md for building a CLI
+  ralph init --spec SPEC.md "Use Go" Generate TASKS.md with spec file
+  ralph version                      Show version information
+  ralph help                         Show this help
 ```
 
 ## Commands
@@ -84,8 +85,11 @@ Usage:
   ralph init [options] <task description>
 
 Options:
-  --no-docker   Run locally instead of in Docker (default is Docker)
-  --fresh       Destroy and recreate the Docker container
+  --spec <file>   Path to a specification file with detailed project info
+                  The file contents inform TASKS.md generation
+                  Your instructions override or add to the spec
+  --no-docker     Run locally instead of in Docker (default is Docker)
+  --fresh         Destroy and recreate the Docker container
 
 Description:
   Uses Claude to generate a comprehensive TASKS.md file based on your
@@ -96,14 +100,16 @@ Description:
   - Testing plans and quality checks
 
 Arguments:
-  <task description>  A description of what you want to build.
-                      Can be multiple words without quotes.
+  <instructions>  When used without --spec: describes what you want to build
+                  When used with --spec: provides technology choices,
+                  corrections, or additional details that override the spec
 
 Examples:
   ralph init Build a REST API for user management
+  ralph init --spec PRODUCT.md "Use Go and SQLite, skip the auth feature"
+  ralph init --spec SPEC.md "Use React with TypeScript"
   ralph init "Create a kanban board app with drag and drop"
   ralph init --no-docker Build a web scraper
-  ralph init --fresh Build a new CLI tool
 
 Notes:
   - Will not overwrite an existing TASKS.md file

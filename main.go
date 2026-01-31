@@ -39,6 +39,17 @@ type StreamMessage struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"` // For "assistant" type messages
+	Delta *struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"delta"` // For "content_block_delta" type messages (legacy)
+	Event *struct {
+		Type  string `json:"type"`
+		Delta *struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"` // For "stream_event" type messages with --include-partial-messages
 }
 
 const defaultMaxIterations = 10
@@ -52,15 +63,17 @@ var version = "dev"
 
 const loopPrompt = `You are an autonomous coding agent. Follow these instructions:
 
-1. Read PROGRESS.md for context on what has been done. Never move or delete this file.
-2. Read TASKS.md and find the first incomplete task (marked with [ ]). Never move or delete this file.
+1. Read PROGRESS.md for context on what has been done. Always in the root of the project, never move or delete this file.
+2. Read TASKS.md and find the first incomplete task (marked with [ ]). Always in the root of the project, never move or delete this file.
 3. Implement the task completely.
 4. Run tests after implementation.
 5. If tests and type checks pass, mark the task complete in TASKS.md by changing [ ] to [x].
 6. Use git for version control and commit after completing each task.
 7. Update PROGRESS.md with any learnings or notes.
-8. If there are no more incomplete tasks in TASKS.md, reply with EXACTLY: "<ralph>complete</ralph>"
-9. Otherwise, end your turn normally after committing and updating TASKS.md and PROGRESS.md.`
+8. Search the ENTIRE TASKS.md file for any remaining "[ ]" markers. If ANY incomplete tasks exist ANYWHERE in the file (including other features), end your turn normally and continue in the next iteration.
+9. ONLY if you have verified that there are ZERO "[ ]" markers remaining in the ENTIRE TASKS.md file (all features complete), reply with EXACTLY: "<ralph>complete</ralph>"
+
+CRITICAL: Do NOT return the completion marker after finishing just one feature. You must complete ALL features and ALL tasks across the entire TASKS.md file before returning the completion marker.`
 
 const initPromptTemplate = `Main Task: %s
 
@@ -281,9 +294,22 @@ func main() {
 			printInitHelp()
 			os.Exit(1)
 		}
+		// Parse optional spec file
+		specPath := parseSpecFlag(args)
+		var specContent, specFilename string
+		if specPath != "" {
+			content, err := os.ReadFile(specPath)
+			if err != nil {
+				fmt.Printf("Error: could not read spec file '%s': %v\n", specPath, err)
+				os.Exit(1)
+			}
+			specContent = string(content)
+			specFilename = filepath.Base(specPath)
+		}
 		useDocker := !hasNoDockerFlag(args) // Docker is default, --no-docker opts out
+		debugMode = hasDebugFlag(args)
 		freshMode = hasFreshFlag(args)
-		if err := runInit(description, useDocker); err != nil {
+		if err := runInit(description, useDocker, specContent, specFilename); err != nil {
 			logger.Fatalf("Init failed: %v", err)
 		}
 	case "login":
@@ -392,10 +418,20 @@ func getDescriptionFromArgs(args []string) string {
 		if strings.HasPrefix(arg, "--max=") || strings.HasPrefix(arg, "-m=") {
 			continue
 		}
+		if arg == "--spec" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--spec=") {
+			continue
+		}
 		if arg == "--no-docker" {
 			continue
 		}
 		if arg == "--fresh" {
+			continue
+		}
+		if arg == "--debug" {
 			continue
 		}
 		if arg == "-h" || arg == "--help" {
@@ -435,6 +471,25 @@ func parseMaxIterations(args []string) int {
 	return defaultMaxIterations
 }
 
+// parseSpecFlag parses the --spec flag from args
+// Returns the spec file path if specified, empty string otherwise
+func parseSpecFlag(args []string) string {
+	for i, arg := range args {
+		var value string
+		if arg == "--spec" {
+			if i+1 < len(args) {
+				value = args[i+1]
+			}
+		} else if strings.HasPrefix(arg, "--spec=") {
+			value = strings.TrimPrefix(arg, "--spec=")
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func printGlobalHelp() {
 	fmt.Println(`ralph - Automated task execution loop with Claude
 
@@ -468,12 +523,13 @@ Authentication (required for Docker mode):
 Run 'ralph <command> --help' for more information on a specific command.
 
 Examples:
-  ralph                     Start in sandboxed Docker container (default)
-  ralph start               Start in sandboxed Docker container
-  ralph start --no-docker   Run locally without Docker
-  ralph init "Build a CLI"  Generate TASKS.md for building a CLI
-  ralph version             Show version information
-  ralph help                Show this help`)
+  ralph                              Start in sandboxed Docker container (default)
+  ralph start                        Start in sandboxed Docker container
+  ralph start --no-docker            Run locally without Docker
+  ralph init "Build a CLI"           Generate TASKS.md for building a CLI
+  ralph init --spec SPEC.md "Use Go" Generate TASKS.md with spec file
+  ralph version                      Show version information
+  ralph help                         Show this help`)
 }
 
 func printStartHelp() {
@@ -532,8 +588,11 @@ Usage:
   ralph init [options] <task description>
 
 Options:
-  --no-docker   Run locally instead of in Docker (default is Docker)
-  --fresh       Destroy and recreate the Docker container
+  --spec <file>   Path to a specification file with detailed project info
+                  The file contents inform TASKS.md generation
+                  Your instructions override or add to the spec
+  --no-docker     Run locally instead of in Docker (default is Docker)
+  --fresh         Destroy and recreate the Docker container
 
 Description:
   Uses Claude to generate a comprehensive TASKS.md file based on your
@@ -544,14 +603,16 @@ Description:
   - Testing plans and quality checks
 
 Arguments:
-  <task description>  A description of what you want to build.
-                      Can be multiple words without quotes.
+  <instructions>  When used without --spec: describes what you want to build
+                  When used with --spec: provides technology choices,
+                  corrections, or additional details that override the spec
 
 Examples:
   ralph init Build a REST API for user management
+  ralph init --spec PRODUCT.md "Use Go and SQLite, skip the auth feature"
+  ralph init --spec SPEC.md "Use React with TypeScript"
   ralph init "Create a kanban board app with drag and drop"
   ralph init --no-docker Build a web scraper
-  ralph init --fresh Build a new CLI tool
 
 Notes:
   - Will not overwrite an existing TASKS.md file
@@ -1032,6 +1093,7 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 		"--print",
 		"--verbose",
 		"--output-format", "stream-json",
+		"--include-partial-messages",
 		prompt,
 	}
 
@@ -1064,11 +1126,24 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 		for {
 			line, err := reader.ReadString('\n')
 			if len(line) > 0 {
+				if debugMode {
+					logger.Printf("DEBUG: Raw line: %s", strings.TrimSpace(line))
+				}
 				var msg StreamMessage
 				if jsonErr := json.Unmarshal([]byte(line), &msg); jsonErr == nil {
+					if debugMode {
+						logger.Printf("DEBUG: Parsed message type: %s", msg.Type)
+					}
 					switch msg.Type {
+					case "stream_event":
+						// Handle streaming deltas from --include-partial-messages
+						if msg.Event != nil && msg.Event.Type == "content_block_delta" && msg.Event.Delta != nil && msg.Event.Delta.Text != "" {
+							fmt.Print(colorDim + msg.Event.Delta.Text + colorReset)
+							outputBuilder.WriteString(msg.Event.Delta.Text)
+						}
 					case "assistant":
-						if msg.Message != nil {
+						// Final message - only output if we haven't streamed anything yet
+						if outputBuilder.Len() == 0 && msg.Message != nil {
 							for _, content := range msg.Message.Content {
 								if content.Type == "text" && content.Text != "" {
 									fmt.Print(colorDim + content.Text + colorReset)
@@ -1076,12 +1151,21 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 								}
 							}
 						}
+					case "content_block_delta":
+						// Legacy format without stream_event wrapper
+						if msg.Delta != nil && msg.Delta.Text != "" {
+							fmt.Print(colorDim + msg.Delta.Text + colorReset)
+							outputBuilder.WriteString(msg.Delta.Text)
+						}
 					case "result":
+						// Final result - only output if we haven't captured anything yet
 						if msg.Result != "" && outputBuilder.Len() == 0 {
 							fmt.Print(colorDim + msg.Result + colorReset)
 							outputBuilder.WriteString(msg.Result)
 						}
 					}
+				} else if debugMode {
+					logger.Printf("DEBUG: JSON parse error: %v", jsonErr)
 				}
 			}
 			if err != nil {
@@ -1122,7 +1206,7 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 	return outputBuilder.String(), nil
 }
 
-func runInit(description string, useDocker bool) error {
+func runInit(description string, useDocker bool, specContent string, specFilename string) error {
 	logger.Printf("Initializing project with task: %s", description)
 
 	// Check if TASKS.md already exists
@@ -1130,7 +1214,69 @@ func runInit(description string, useDocker bool) error {
 		return fmt.Errorf("TASKS.md already exists, refusing to overwrite")
 	}
 
-	prompt := fmt.Sprintf(initPromptTemplate, description)
+	// Build the prompt based on whether spec content is provided
+	var prompt string
+	if specContent != "" {
+		// When spec is provided, user instructions are overrides/corrections
+		prompt = fmt.Sprintf(`<spec source="%s">
+%s
+</spec>
+
+<instructions>
+%s
+</instructions>
+
+The <spec> contains the project specification. The <instructions> contain corrections, overrides, and technical guidance from the user that take precedence over the spec. When there are conflicts, always follow <instructions>.
+
+`, specFilename, specContent, description)
+
+		// Append the architect instructions (without "Main Task: %s")
+		prompt += `You are a software architect creating a comprehensive implementation plan. Your job is to produce a detailed, well-organized document that will guide a developer through building the software described above.
+
+## Document Structure
+
+Start with a **Summary** section that describes:
+- What we are building (high-level overview)
+- Key technologies and frameworks to use
+- Core functionality and user value
+
+Then organize the implementation into **Features**. Each feature should be a logical, cohesive unit of functionality.
+
+## Feature Format
+
+Assign each feature an ID in the format ` + "`XX-NNNN`" + ` where:
+- XX = 2-letter project code (consistent across all features)
+- NNNN = sequential feature number (0001, 0002, etc.)
+
+For each feature include:
+1. Feature title and description
+2. Acceptance criteria (what "done" looks like)
+3. Tasks to implement the feature
+4. Testing plan (unit tests, integration tests, manual testing steps)
+5. Quality checks (linter, formatter, type checker as relevant to the language)
+
+## Task Format
+
+Use ` + "`[ ] Task description`" + ` for incomplete tasks. Tasks can be referenced as ` + "`XX-NNNN-Y`" + ` where Y is the task number within the feature.
+
+## Guidelines
+
+- Break features into small, focused tasks (15-30 min each ideally)
+- Each task should be independently completable and testable
+- Prefer many small tasks over few large ones
+- Include setup/scaffolding as the first feature
+- Include a final feature for documentation and cleanup
+- Consider dependencies between features and order them appropriately
+- Be specific about file names, function names, and implementation details
+
+Output only the TASKS.md content, nothing else.`
+
+		// Add instruction to reference spec file in output
+		prompt += fmt.Sprintf("\n\nInclude a note at the top of TASKS.md (after the title) referencing the specification file (%s) that informed this plan.", specFilename)
+	} else {
+		// No spec - use original template as-is
+		prompt = fmt.Sprintf(initPromptTemplate, description)
+	}
 
 	logger.Println("Generating TASKS.md with Claude...")
 	startTime := time.Now()
@@ -1275,7 +1421,7 @@ func ensureProgressFile() error {
 }
 
 func runClaudeWithPrompt(prompt string) (string, error) {
-	cmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", prompt)
+	cmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages", prompt)
 
 	// Create pipes for stdout and stderr
 	stdout, err := cmd.StdoutPipe()
@@ -1308,9 +1454,15 @@ func runClaudeWithPrompt(prompt string) (string, error) {
 				if jsonErr := json.Unmarshal([]byte(line), &msg); jsonErr == nil {
 					// Handle different message types
 					switch msg.Type {
+					case "stream_event":
+						// Handle streaming deltas from --include-partial-messages
+						if msg.Event != nil && msg.Event.Type == "content_block_delta" && msg.Event.Delta != nil && msg.Event.Delta.Text != "" {
+							fmt.Print(colorDim + msg.Event.Delta.Text + colorReset)
+							outputBuilder.WriteString(msg.Event.Delta.Text)
+						}
 					case "assistant":
-						// Assistant message contains content array
-						if msg.Message != nil {
+						// Final message - only output if we haven't streamed anything yet
+						if outputBuilder.Len() == 0 && msg.Message != nil {
 							for _, content := range msg.Message.Content {
 								if content.Type == "text" && content.Text != "" {
 									fmt.Print(colorDim + content.Text + colorReset)
@@ -1318,8 +1470,14 @@ func runClaudeWithPrompt(prompt string) (string, error) {
 								}
 							}
 						}
+					case "content_block_delta":
+						// Legacy format without stream_event wrapper
+						if msg.Delta != nil && msg.Delta.Text != "" {
+							fmt.Print(colorDim + msg.Delta.Text + colorReset)
+							outputBuilder.WriteString(msg.Delta.Text)
+						}
 					case "result":
-						// Final result - use if we haven't already captured content
+						// Final result - only output if we haven't captured anything yet
 						if msg.Result != "" && outputBuilder.Len() == 0 {
 							fmt.Print(colorDim + msg.Result + colorReset)
 							outputBuilder.WriteString(msg.Result)

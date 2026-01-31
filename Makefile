@@ -1,5 +1,14 @@
 VERSION ?= dev
-LDFLAGS := -s -w -X main.version=$(VERSION)
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+# If VERSION is "dev", append the commit hash
+ifeq ($(VERSION),dev)
+    FULL_VERSION := dev-$(GIT_COMMIT)
+else
+    FULL_VERSION := $(VERSION)
+endif
+
+LDFLAGS := -s -w -X main.version=$(FULL_VERSION)
 
 build:
 	mkdir -p dist
