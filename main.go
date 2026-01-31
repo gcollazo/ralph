@@ -52,8 +52,8 @@ var version = "dev"
 
 const loopPrompt = `You are an autonomous coding agent. Follow these instructions:
 
-1. Read PROGRESS.md for context on what has been done.
-2. Read TASKS.md and find the first incomplete task (marked with [ ]).
+1. Read PROGRESS.md for context on what has been done. Never move or delete this file.
+2. Read TASKS.md and find the first incomplete task (marked with [ ]). Never move or delete this file.
 3. Implement the task completely.
 4. Run tests after implementation.
 5. If tests and type checks pass, mark the task complete in TASKS.md by changing [ ] to [x].
