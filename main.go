@@ -296,20 +296,19 @@ func main() {
 		}
 		// Parse optional spec file
 		specPath := parseSpecFlag(args)
-		var specContent, specFilename string
+		var specFilename string
 		if specPath != "" {
-			content, err := os.ReadFile(specPath)
-			if err != nil {
-				fmt.Printf("Error: could not read spec file '%s': %v\n", specPath, err)
+			// Verify the file exists (but don't read it - Claude will read it)
+			if _, err := os.Stat(specPath); os.IsNotExist(err) {
+				fmt.Printf("Error: spec file '%s' not found\n", specPath)
 				os.Exit(1)
 			}
-			specContent = string(content)
 			specFilename = filepath.Base(specPath)
 		}
 		useDocker := !hasNoDockerFlag(args) // Docker is default, --no-docker opts out
 		debugMode = hasDebugFlag(args)
 		freshMode = hasFreshFlag(args)
-		if err := runInit(description, useDocker, specContent, specFilename); err != nil {
+		if err := runInit(description, useDocker, specFilename); err != nil {
 			logger.Fatalf("Init failed: %v", err)
 		}
 	case "login":
@@ -1206,7 +1205,7 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 	return outputBuilder.String(), nil
 }
 
-func runInit(description string, useDocker bool, specContent string, specFilename string) error {
+func runInit(description string, useDocker bool, specFilename string) error {
 	logger.Printf("Initializing project with task: %s", description)
 
 	// Check if TASKS.md already exists
@@ -1214,21 +1213,19 @@ func runInit(description string, useDocker bool, specContent string, specFilenam
 		return fmt.Errorf("TASKS.md already exists, refusing to overwrite")
 	}
 
-	// Build the prompt based on whether spec content is provided
+	// Build the prompt based on whether spec file is provided
 	var prompt string
-	if specContent != "" {
-		// When spec is provided, user instructions are overrides/corrections
-		prompt = fmt.Sprintf(`<spec source="%s">
-%s
-</spec>
+	if specFilename != "" {
+		// When spec is provided, tell Claude to read it instead of embedding contents
+		prompt = fmt.Sprintf(`First, read the specification file "%s" in the current directory. This file contains the project specification.
 
 <instructions>
 %s
 </instructions>
 
-The <spec> contains the project specification. The <instructions> contain corrections, overrides, and technical guidance from the user that take precedence over the spec. When there are conflicts, always follow <instructions>.
+The specification file contains the project details. The <instructions> contain corrections, overrides, and technical guidance from the user that take precedence over the spec. When there are conflicts, always follow <instructions>.
 
-`, specFilename, specContent, description)
+`, specFilename, description)
 
 		// Append the architect instructions (without "Main Task: %s")
 		prompt += `You are a software architect creating a comprehensive implementation plan. Your job is to produce a detailed, well-organized document that will guide a developer through building the software described above.
