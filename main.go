@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -63,7 +62,7 @@ var version = "dev"
 
 const loopPrompt = `You are an autonomous coding agent. Follow these instructions:
 
-1. Read PROGRESS.md for context on what has been done. Always in the root of the project, never move or delete this file.
+1. Read PROGRESS.md for context on what has been done. If it doesn't exist, create it. Always in the root of the project, never move or delete this file.
 2. Read TASKS.md and find the first incomplete task (marked with [ ]). Always in the root of the project, never move or delete this file.
 3. Implement the task completely.
 4. Run tests after implementation.
@@ -115,7 +114,7 @@ Use ` + "`[ ] Task description`" + ` for incomplete tasks. Tasks can be referenc
 - Consider dependencies between features and order them appropriately
 - Be specific about file names, function names, and implementation details
 
-Output only the TASKS.md content, nothing else.`
+Write the plan directly to a file named TASKS.md in the current directory. Use your file writing tool to create the file.`
 
 const completionMarker = "<ralph>complete</ralph>"
 
@@ -563,7 +562,7 @@ Description:
 
 Requirements:
   - TASKS.md must exist and not be empty (run 'ralph init' first)
-  - PROGRESS.md will be created if it doesn't exist
+  - PROGRESS.md will be created by Claude if it doesn't exist
   - Docker must be installed and running (unless using --no-docker)
   - Claude token in keychain (see 'ralph help' for setup)
 
@@ -1039,11 +1038,6 @@ func runInDocker(maxIterations int) error {
 		logger.Printf("Starting ralph loop in Docker (max %d iterations, dangerous mode)", maxIterations)
 	}
 
-	// Ensure PROGRESS.md exists
-	if err := ensureProgressFile(); err != nil {
-		return err
-	}
-
 	// Run the loop
 	iteration := 1
 	for {
@@ -1078,26 +1072,11 @@ func runInDocker(maxIterations int) error {
 	}
 }
 
-func runClaudeInDocker(containerName string, prompt string, apiKey string, envVarName string) (string, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Build docker exec command - pass token at exec time for fresh credentials
-	args := []string{
-		"exec",
-		"-e", envVarName + "=" + apiKey,
-		containerName,
-		"claude",
-		"--dangerously-skip-permissions",
-		"--print",
-		"--verbose",
-		"--output-format", "stream-json",
-		"--include-partial-messages",
-		prompt,
-	}
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-
+// runClaudeCommand executes a Claude command, streams output to terminal, and returns the final response.
+// Streaming text is displayed in real-time but not accumulated.
+// Only the final response from "result" or "assistant" message types is captured and returned.
+// This prevents false completion marker detection from streaming text.
+func runClaudeCommand(cmd *exec.Cmd) (string, error) {
 	// Create pipes for stdout and stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1110,14 +1089,14 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 	}
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start docker exec: %w", err)
+		return "", fmt.Errorf("failed to start command: %w", err)
 	}
 
-	// Capture output while streaming to terminal
-	var outputBuilder strings.Builder
+	// Only capture the final response, not streaming text
+	var finalResponse strings.Builder
 	var wg sync.WaitGroup
 
-	// Stream stdout - parse JSON and display content in dim color
+	// Stream stdout - parse JSON, display in real-time, only capture final response
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1135,32 +1114,28 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 					}
 					switch msg.Type {
 					case "stream_event":
-						// Handle streaming deltas from --include-partial-messages
+						// Streaming deltas - display but don't accumulate
 						if msg.Event != nil && msg.Event.Type == "content_block_delta" && msg.Event.Delta != nil && msg.Event.Delta.Text != "" {
 							fmt.Print(colorDim + msg.Event.Delta.Text + colorReset)
-							outputBuilder.WriteString(msg.Event.Delta.Text)
+						}
+					case "content_block_delta":
+						// Legacy format - display but don't accumulate
+						if msg.Delta != nil && msg.Delta.Text != "" {
+							fmt.Print(colorDim + msg.Delta.Text + colorReset)
 						}
 					case "assistant":
-						// Final message - only output if we haven't streamed anything yet
-						if outputBuilder.Len() == 0 && msg.Message != nil {
+						// Final message - capture for completion marker check
+						if msg.Message != nil {
 							for _, content := range msg.Message.Content {
 								if content.Type == "text" && content.Text != "" {
-									fmt.Print(colorDim + content.Text + colorReset)
-									outputBuilder.WriteString(content.Text)
+									finalResponse.WriteString(content.Text)
 								}
 							}
 						}
-					case "content_block_delta":
-						// Legacy format without stream_event wrapper
-						if msg.Delta != nil && msg.Delta.Text != "" {
-							fmt.Print(colorDim + msg.Delta.Text + colorReset)
-							outputBuilder.WriteString(msg.Delta.Text)
-						}
 					case "result":
-						// Final result - only output if we haven't captured anything yet
-						if msg.Result != "" && outputBuilder.Len() == 0 {
-							fmt.Print(colorDim + msg.Result + colorReset)
-							outputBuilder.WriteString(msg.Result)
+						// Final result - capture for completion marker check
+						if msg.Result != "" {
+							finalResponse.WriteString(msg.Result)
 						}
 					}
 				} else if debugMode {
@@ -1199,10 +1174,29 @@ func runClaudeInDocker(containerName string, prompt string, apiKey string, envVa
 	wg.Wait()
 
 	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("docker exec exited with error: %w", err)
+		return "", fmt.Errorf("command exited with error: %w", err)
 	}
 
-	return outputBuilder.String(), nil
+	return finalResponse.String(), nil
+}
+
+func runClaudeInDocker(containerName string, prompt string, apiKey string, envVarName string) (string, error) {
+	// Build docker exec command - pass token at exec time for fresh credentials
+	args := []string{
+		"exec",
+		"-e", envVarName + "=" + apiKey,
+		containerName,
+		"claude",
+		"--dangerously-skip-permissions",
+		"--print",
+		"--verbose",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		prompt,
+	}
+
+	cmd := exec.Command("docker", args...)
+	return runClaudeCommand(cmd)
 }
 
 func runInit(description string, useDocker bool, specFilename string) error {
@@ -1266,7 +1260,7 @@ Use ` + "`[ ] Task description`" + ` for incomplete tasks. Tasks can be referenc
 - Consider dependencies between features and order them appropriately
 - Be specific about file names, function names, and implementation details
 
-Output only the TASKS.md content, nothing else.`
+Write the plan directly to a file named TASKS.md in the current directory. Use your file writing tool to create the file.`
 
 		// Add instruction to reference spec file in output
 		prompt += fmt.Sprintf("\n\nInclude a note at the top of TASKS.md (after the title) referencing the specification file (%s) that informed this plan.", specFilename)
@@ -1278,7 +1272,6 @@ Output only the TASKS.md content, nothing else.`
 	logger.Println("Generating TASKS.md with Claude...")
 	startTime := time.Now()
 
-	var output string
 	var err error
 
 	if useDocker {
@@ -1309,27 +1302,13 @@ Output only the TASKS.md content, nothing else.`
 		dockerContainerName = containerName
 		dockerMutex.Unlock()
 
-		output, err = runClaudeInDocker(containerName, prompt, apiKey, envVarName)
+		_, err = runClaudeInDocker(containerName, prompt, apiKey, envVarName)
 	} else {
-		output, err = runClaudeWithPrompt(prompt)
+		_, err = runClaudeWithPrompt(prompt)
 	}
 
 	if err != nil {
 		return fmt.Errorf("failed to generate tasks: %w", err)
-	}
-
-	// Write output to TASKS.md
-	// Handle case where file might be in /workspace in docker
-	tasksPath := "TASKS.md"
-	if useDocker {
-		// Docker mounts cwd to /workspace, but we're running from host
-		// so we write to local TASKS.md
-		cwd, _ := os.Getwd()
-		tasksPath = filepath.Join(cwd, "TASKS.md")
-	}
-
-	if err := os.WriteFile(tasksPath, []byte(output), 0644); err != nil {
-		return fmt.Errorf("failed to write TASKS.md: %w", err)
 	}
 
 	logger.Printf("TASKS.md created successfully in %v", time.Since(startTime).Round(time.Second))
@@ -1348,11 +1327,6 @@ func run(maxIterations int) error {
 		return err
 	}
 	logger.Println("TASKS.md validated")
-
-	// Check PROGRESS.md exists, create if not
-	if err := ensureProgressFile(); err != nil {
-		return err
-	}
 
 	// Run the ralph loop
 	iteration := 1
@@ -1402,121 +1376,7 @@ func checkTasksFile() error {
 	return nil
 }
 
-func ensureProgressFile() error {
-	_, err := os.Stat("PROGRESS.md")
-	if os.IsNotExist(err) {
-		f, err := os.Create("PROGRESS.md")
-		if err != nil {
-			return fmt.Errorf("failed to create PROGRESS.md: %w", err)
-		}
-		f.Close()
-		logger.Println("Created PROGRESS.md")
-	} else if err != nil {
-		return fmt.Errorf("failed to check PROGRESS.md: %w", err)
-	}
-	return nil
-}
-
 func runClaudeWithPrompt(prompt string) (string, error) {
 	cmd := exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages", prompt)
-
-	// Create pipes for stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start claude: %w", err)
-	}
-
-	// Capture output while streaming to terminal
-	var outputBuilder strings.Builder
-	var wg sync.WaitGroup
-
-	// Stream stdout - parse JSON and display content in dim color
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		reader := bufio.NewReader(stdout)
-		for {
-			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
-				var msg StreamMessage
-				if jsonErr := json.Unmarshal([]byte(line), &msg); jsonErr == nil {
-					// Handle different message types
-					switch msg.Type {
-					case "stream_event":
-						// Handle streaming deltas from --include-partial-messages
-						if msg.Event != nil && msg.Event.Type == "content_block_delta" && msg.Event.Delta != nil && msg.Event.Delta.Text != "" {
-							fmt.Print(colorDim + msg.Event.Delta.Text + colorReset)
-							outputBuilder.WriteString(msg.Event.Delta.Text)
-						}
-					case "assistant":
-						// Final message - only output if we haven't streamed anything yet
-						if outputBuilder.Len() == 0 && msg.Message != nil {
-							for _, content := range msg.Message.Content {
-								if content.Type == "text" && content.Text != "" {
-									fmt.Print(colorDim + content.Text + colorReset)
-									outputBuilder.WriteString(content.Text)
-								}
-							}
-						}
-					case "content_block_delta":
-						// Legacy format without stream_event wrapper
-						if msg.Delta != nil && msg.Delta.Text != "" {
-							fmt.Print(colorDim + msg.Delta.Text + colorReset)
-							outputBuilder.WriteString(msg.Delta.Text)
-						}
-					case "result":
-						// Final result - only output if we haven't captured anything yet
-						if msg.Result != "" && outputBuilder.Len() == 0 {
-							fmt.Print(colorDim + msg.Result + colorReset)
-							outputBuilder.WriteString(msg.Result)
-						}
-					}
-				}
-			}
-			if err != nil {
-				if err != io.EOF {
-					logger.Printf("stdout read error: %v", err)
-				}
-				break
-			}
-		}
-		// Ensure we end with a newline and reset color
-		fmt.Println(colorReset)
-	}()
-
-	// Stream stderr to terminal (in dim color too)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		reader := bufio.NewReader(stderr)
-		for {
-			line, err := reader.ReadString('\n')
-			if len(line) > 0 {
-				fmt.Fprint(os.Stderr, colorDim+line+colorReset)
-			}
-			if err != nil {
-				if err != io.EOF {
-					logger.Printf("stderr read error: %v", err)
-				}
-				break
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("claude exited with error: %w", err)
-	}
-
-	return outputBuilder.String(), nil
+	return runClaudeCommand(cmd)
 }
